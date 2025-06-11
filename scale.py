@@ -91,106 +91,66 @@ def bilinear(depth: np.ndarray, x: float, y: float) -> float | None:
 def rgbd_scale_and_export(model_dir: Path,
                           depth_dir: Path,
                           intrinsics: Tuple[float, float, float, float],
-                          out_path: Path | None = None,
-                          max_depth_m: float = 2.0,
-                          samples_per_image: int = 2000) -> Path:
+                          out_path: Path | None = None) -> Path:
     """
-    * Samples up to `samples_per_image` RGB-D correspondences per image.
-    * Estimates global scale = mean( z_depth / z_colmap ).
-    * Scales translations, converts to camera→world, flips Y, writes 3×4 poses.
-    Returns path to written poses file.
+    Port of Alex Yu’s C++ scale-estimation, but:
+      • reads depth as <image_stem>.npy  (float, already in mm)
+      • writes poses in millimetres (no extra ×1000)
     """
-    model_dir = Path(model_dir)
-    depth_dir = Path(depth_dir)
+    model_dir, depth_dir = Path(model_dir), Path(depth_dir)
     fx, fy, cx, cy = intrinsics
+
     images = load_images_txt(model_dir / "images.txt")
     pts3d  = load_points3d_txt(model_dir / "points3D.txt")
 
-    ratios = []
-    rng = random.Random(0)
+    ratios: List[float] = []
 
     for im in images:
-        depth = cv2.imread(
-            str(depth_dir / f"{Path(im.name).stem}.exr"),
-            cv2.IMREAD_UNCHANGED)
-        if depth is None:
+        depth_path = depth_dir / f"{Path(im.name).stem}.npy"
+        if not depth_path.exists():
             continue
+        depth = np.load(depth_path).astype(np.float32)    # depth in **mm**
+        if depth.ndim != 2:
+            raise ValueError(f"{depth_path} is not a 2-D array")
 
         idxs = [j for j, pid in enumerate(im.points3d_ids) if pid >= 0]
-        rng.shuffle(idxs)
-        idxs = idxs[:samples_per_image]
 
-        Rwc = qvec_to_rotmat(im.qvec).T      # world→cam  →  cam→world
+        Rwc = qvec_to_rotmat(im.qvec).T      # world→cam → cam→world
         tcw = -Rwc @ im.tvec
 
         for j in idxs:
             pid = im.points3d_ids[j]
             P_w = pts3d[pid]
-            P_c = Rwc.T @ (P_w - tcw)        # world→cam
-            if P_c[2] <= 0:
+            P_c = Rwc.T @ (P_w - tcw)
+            if P_c[2] <= 0.0:
                 continue
             x = fx * P_c[0] / P_c[2] + cx
             y = fy * P_c[1] / P_c[2] + cy
-            z_d = bilinear(depth, x, y)
-            if z_d is None or z_d > max_depth_m:
+            z_d = bilinear(depth, x, y)      # returns mm
+            if z_d is None or z_d <= 0.0:
                 continue
-            ratios.append(z_d / P_c[2])
+            ratios.append(z_d / P_c[2])      # mm / (COLMAP-units)
 
     if not ratios:
-        print("[WARN] No valid RGB-D correspondences, falling back to 1.0 scale")
+        print("[WARN] No valid RGB-D correspondences; scale=1")
         scale = 1.0
     else:
-        ratios = np.asarray(ratios, dtype=np.float64)
-        scale = ratios.mean()
-        print(f"[INFO] global scale = {scale:.6f} m/colmap "
+        ratios = np.asarray(ratios, np.float64)
+        scale  = ratios.mean()
+        print(f"[INFO] global scale = {scale:.6f} mm/colmap "
               f"(±{ratios.std():.6f}, {len(ratios)} samples)")
 
-    # ---------------------------------------------------------------- poses
+    # ─── write 3×4 poses (mm, Y-up) ──────────────────────────────────────────
     lines = []
     for im in sorted(images, key=lambda x: x.name):
         Rwc = qvec_to_rotmat(im.qvec).T
-        tcw = -Rwc @ im.tvec * scale              # → millimetres later
+        tcw = -Rwc @ im.tvec * scale                 # now in mm
         Rfl = S_FLIP @ Rwc @ S_FLIP
         tfl = S_FLIP @ tcw
-        T = np.hstack([Rfl, tfl[:, None]]).reshape(-1) * 1000.0  # metres→mm
+        T   = np.hstack([Rfl, tfl[:, None]]).reshape(-1)  # 12 numbers
         lines.append(" ".join(f"{v:.6f}" for v in T))
 
-    if out_path is None:
-        out_path = model_dir / "poses_mm_yup.txt"
+    out_path = (out_path or model_dir / "poses_mm_yup.txt")
     Path(out_path).write_text("\n".join(lines))
     print(f"[INFO] wrote {len(lines)} poses → {out_path}")
     return out_path
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Convenience wrappers (keep the simple median-depth API too, if you like)
-# ─────────────────────────────────────────────────────────────────────────────
-def metric_scale_mm_median(poses: np.ndarray,
-                           depth_dir: Path,
-                           max_depth_mm: int = 2000) -> float:
-    """
-    (original quick-and-dirty method, kept for reference)
-    """
-    med_depths = []
-    for p in depth_dir.iterdir():
-        if p.suffix == ".png":
-            d = np.frombuffer(p.read_bytes(), dtype=np.uint16).astype(np.float32)
-        else:
-            d = np.load(p).astype(np.float32)
-        d = d[(d > 0) & (d < max_depth_mm)]
-        if d.size:
-            med_depths.append(np.median(d))
-    if not med_depths:
-        return 1.0
-    depth_med = np.median(med_depths)
-    trans_med = np.median(np.linalg.norm(poses[:, :3], axis=1))
-    return depth_med / (trans_med + 1e-9)
-
-
-def flip_y_down_to_up(t_xyz: np.ndarray, q_xyzw: np.ndarray):
-    """Apply S_FLIP to translation and quaternion."""
-    Rmat = R.from_quat(q_xyzw).as_matrix()
-    R_fl = S_FLIP @ Rmat @ S_FLIP
-    q_out = R.from_matrix(R_fl).as_quat()
-    t_out = S_FLIP @ t_xyz
-    return t_out, q_out
