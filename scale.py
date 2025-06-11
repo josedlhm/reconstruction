@@ -1,10 +1,11 @@
 # reconlib/depth_scale.py
-from pathlib import Path
-import math, struct, random
-from typing import Tuple, List, Dict
+import math
 import numpy as np
 import cv2
 from scipy.spatial.transform import Rotation as R
+from pathlib import Path
+from typing import Tuple, List, Dict
+from utils import load_intrinsics        # reuse if desired
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Constants
