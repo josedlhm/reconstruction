@@ -1,0 +1,8 @@
+# config.yaml – pipeline settings
+# --------------------------------
+# All paths can be absolute ("/home/…") or relative to this file.
+
+images_dir:  ~/Documents/extraction/out/images                 # folder with input RGB frames
+depth_dir:   ~/Documents/extraction/out/depth             # folder with per-frame *.npy depth maps
+intrinsics:  [1272.44, 1272.67, 920.062, 618.949]   # fx, fy, cx, cy
+out_root:    out                    # where COLMAP model + poses_mm_yup.txt will be written

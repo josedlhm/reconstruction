@@ -14,16 +14,19 @@ S_FLIP = np.diag([1., -1., 1.])         # Y-down  →  Y-up
 # ─────────────────────────────────────────────────────────────────────────────
 #  Helpers: parsing COLMAP TXT model (much simpler than *.bin)
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 def load_points3d_txt(path_txt: Path) -> Dict[int, np.ndarray]:
-    """Return dict {point3D_id: XYZ[np.float64]}"""
+    """Return dict {point3D_id: XYZ[np.float64]}  – only first 4 columns used."""
     pts = {}
     with path_txt.open() as f:
         for ln in f:
             if ln.startswith("#") or not ln.strip():
                 continue
             toks = ln.split()
-            pid = int(toks[0])
-            xyz = np.array(list(map(float, toks[1:4])), dtype=np.float64)
+            pid  = int(toks[0])
+            xyz  = np.array(list(map(float, toks[1:4])), dtype=np.float64)
             pts[pid] = xyz
     return pts
 
@@ -36,11 +39,13 @@ class ImageRec:
         self.points_xy, self.points3d_ids = pts_xy, pids
 
 
-def load_images_txt(path_txt: Path) -> List[ImageRec]:
-    """Parse COLMAP images.txt (two-line format per image)."""
-    images = []
+
+def load_images_txt(path_txt: Path) -> List["ImageRec"]:
+    """Parse COLMAP images.txt (TXT model) into ImageRec objects."""
+    images: List[ImageRec] = []
     with path_txt.open() as f:
         lines = f.readlines()
+
     i = 0
     while i < len(lines):
         ln1 = lines[i].strip()
@@ -50,19 +55,26 @@ def load_images_txt(path_txt: Path) -> List[ImageRec]:
         ln2 = lines[i + 1].strip()
         i += 2
 
-        toks = ln1.split()
+        toks    = ln1.split()
         img_id, qw, qx, qy, qz, tx, ty, tz, cam_id = toks[:9]
-        name = toks[9]
-        qvec = np.array([float(qx), float(qy), float(qz), float(qw)],
-                        dtype=np.float64)
-        tvec = np.array([float(tx), float(ty), float(tz)], dtype=np.float64)
+        name    = toks[9]
+        qvec    = np.array([float(qx), float(qy), float(qz), float(qw)], np.float64)
+        tvec    = np.array([float(tx), float(ty), float(tz)],            np.float64)
 
-        # second line: x y point3D_id ...
-        pts = ln2.split()
-        xy = np.asarray(list(map(float, pts[0::3])), dtype=np.float64).reshape(-1, 2)
-        pids = np.asarray(list(map(int, pts[2::3])), dtype=np.int64)
+        # second line tokens: x y point3D_id  (repeated)
+        pts     = ln2.split()
+        n_trip  = len(pts) // 3                    # complete triples only
+        xy_flat = [float(v) for k in range(n_trip) for v in pts[3*k : 3*k+2]]
+        ids     = [int(pts[3*k+2]) for k in range(n_trip)]
+
+        xy   = np.asarray(xy_flat, dtype=np.float64).reshape(-1, 2)
+        pids = np.asarray(ids,      dtype=np.int64)
+
         images.append(ImageRec(name, qvec, tvec, xy, pids))
+
     return images
+
+
 
 
 def qvec_to_rotmat(q: np.ndarray) -> np.ndarray:
@@ -106,7 +118,9 @@ def rgbd_scale_and_export(model_dir: Path,
     ratios: List[float] = []
 
     for im in images:
-        depth_path = depth_dir / f"{Path(im.name).stem}.npy"
+        stem = Path(im.name).stem          # img_00000
+        # strip the "img_" prefix and add "depth_"
+        depth_path = depth_dir / f"depth_{stem[4:]}.npy"
         if not depth_path.exists():
             continue
         depth = np.load(depth_path).astype(np.float32)    # depth in **mm**
@@ -126,7 +140,16 @@ def rgbd_scale_and_export(model_dir: Path,
                 continue
             x = fx * P_c[0] / P_c[2] + cx
             y = fy * P_c[1] / P_c[2] + cy
-            z_d = bilinear(depth, x, y)      # returns mm
+            z_d = bilinear(depth, x, y)
+
+
+            if z_d is None:
+                continue
+
+            if (not np.isfinite(z_d)) or z_d <= 0.0 \
+            or (not np.isfinite(P_c[2])) or P_c[2] <= 1e-6:
+                continue
+     # returns mm
             if z_d is None or z_d <= 0.0:
                 continue
             ratios.append(z_d / P_c[2])      # mm / (COLMAP-units)

@@ -5,9 +5,11 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-def _run(cmd: list[str]):                 # simple wrapper
+def _run(cmd: list[str | Path]):          # allow Path too
+    cmd = [str(c) for c in cmd]           # ← cast everything to str
     logger.info("▶ %s", " ".join(cmd))
     subprocess.run(cmd, check=True)
+
 
 def run_colmap(images_dir: Path, out_dir: Path, intrinsics_txt: str,
                *, quality="high", use_gpu=True,
@@ -41,6 +43,10 @@ def run_colmap(images_dir: Path, out_dir: Path, intrinsics_txt: str,
 
     if bundle_adjust:
         refined = sparse_dir / "refined"
+        if refined.exists() and not refined.is_dir():
+            refined.unlink()               # it was a stray file
+        refined.mkdir(parents=True, exist_ok=True)
+        
         _run(["colmap", "bundle_adjuster",
               "--input_path", final, "--output_path", refined])
         final = refined
